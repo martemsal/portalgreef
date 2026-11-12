@@ -1,9 +1,14 @@
 "use client";
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import type { CampaignRecord, Profile } from "@/types/database";
+import {
+  type CampaignRecord,
+  type Profile,
+  getProfileCompanies,
+  unpackCampaignCompany,
+} from "@/types/database";
 import {
   formatBRL,
   formatNumber,
@@ -19,6 +24,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { ThemeToggle, useTheme } from "@/components/theme/ThemeProvider";
 import {
   PieChart,
   Pie,
@@ -36,6 +42,7 @@ import {
   ArrowDownRight,
   ArrowUpRight,
   BarChart3,
+  Building2,
   Calendar,
   Eye,
   GitCompare,
@@ -80,21 +87,92 @@ export function ClientPortal({
 }: ClientPortalProps) {
   const router = useRouter();
   const supabase = createClient();
+  const { theme } = useTheme();
   const isAdmin = viewerProfile.role === "admin";
 
-  // Lista de meses disponíveis para o cliente
+  // Empresas vinculadas ao cliente ativo
+  const clientCompanies = useMemo(() => {
+    const fromProfile = getProfileCompanies(clientProfile);
+    const fallback = fromProfile[0] ?? clientProfile.company_name ?? "Empresa Principal";
+    const fromRecords = records.map(
+      (r) =>
+        unpackCampaignCompany(r.campaign_name, r.company_name, fallback)
+          .companyName
+    );
+    const merged = Array.from(new Set([...fromProfile, ...fromRecords])).filter(
+      Boolean
+    );
+    return merged.length > 0 ? merged : [fallback];
+  }, [clientProfile, records]);
+
+  // Estado da empresa selecionada no dropdown (pelo cliente ou admin)
+  const [selectedCompany, setSelectedCompany] = useState<string>(
+    clientCompanies[0] ?? clientProfile.company_name
+  );
+
+  // Atualiza a empresa ativa quando troca de cliente (ex: no seletor do admin)
+  useEffect(() => {
+    if (
+      selectedCompany !== "ALL_COMPANIES" &&
+      !clientCompanies.includes(selectedCompany)
+    ) {
+      setSelectedCompany(clientCompanies[0] ?? clientProfile.company_name);
+    }
+  }, [clientCompanies, clientProfile.company_name, selectedCompany]);
+
+  // Normaliza os registros extraindo a empresa e o nome limpo da campanha
+  const defaultCompanyFallback =
+    clientCompanies[0] ?? clientProfile.company_name ?? "Empresa Principal";
+
+  const normalizedRecords = useMemo(() => {
+    return records.map((r) => {
+      const { companyName, cleanCampaignName } = unpackCampaignCompany(
+        r.campaign_name,
+        r.company_name,
+        defaultCompanyFallback
+      );
+      return {
+        ...r,
+        company_name: companyName,
+        campaign_name: cleanCampaignName,
+      };
+    });
+  }, [records, defaultCompanyFallback]);
+
+  // Filtra os registros pela empresa escolhida no dropdown
+  const companyFilteredRecords = useMemo(() => {
+    if (selectedCompany === "ALL_COMPANIES" || clientCompanies.length <= 1) {
+      if (selectedCompany === "ALL_COMPANIES") return normalizedRecords;
+    }
+    return normalizedRecords.filter((r) => r.company_name === selectedCompany);
+  }, [normalizedRecords, selectedCompany, clientCompanies.length]);
+
+  const activeCompanyDisplayName =
+    selectedCompany === "ALL_COMPANIES"
+      ? `Todas as Empresas (${clientCompanies.join(", ")})`
+      : selectedCompany;
+
+  // Lista de meses disponíveis para a empresa selecionada
   const availableMonths = useMemo(() => {
-    const unique = Array.from(new Set(records.map((r) => r.period_month)))
+    const unique = Array.from(
+      new Set(companyFilteredRecords.map((r) => r.period_month))
+    )
       .sort()
       .reverse();
     if (unique.length === 0) {
+      const allUnique = Array.from(
+        new Set(normalizedRecords.map((r) => r.period_month))
+      )
+        .sort()
+        .reverse();
+      if (allUnique.length > 0) return allUnique;
       const now = new Date();
       return [
         `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`,
       ];
     }
     return unique;
-  }, [records]);
+  }, [companyFilteredRecords, normalizedRecords]);
 
   const [viewMode, setViewMode] = useState<"single" | "compare">("single");
   const [primaryMonth, setPrimaryMonth] = useState<string>(
@@ -104,6 +182,13 @@ export function ClientPortal({
     availableMonths[1] ?? availableMonths[0] ?? "2026-10"
   );
 
+  // Garante que o mês selecionado exista quando o usuário troca de empresa
+  useEffect(() => {
+    if (availableMonths.length > 0 && !availableMonths.includes(primaryMonth)) {
+      setPrimaryMonth(availableMonths[0]);
+    }
+  }, [availableMonths, primaryMonth]);
+
   // Estado do Modal de Zoom de Criativo
   const [zoomedCreative, setZoomedCreative] = useState<CampaignRecord | null>(
     null
@@ -111,13 +196,13 @@ export function ClientPortal({
 
   // Filtra registros do mês principal e do mês de comparação
   const primaryRecords = useMemo(
-    () => records.filter((r) => r.period_month === primaryMonth),
-    [records, primaryMonth]
+    () => companyFilteredRecords.filter((r) => r.period_month === primaryMonth),
+    [companyFilteredRecords, primaryMonth]
   );
 
   const compareRecords = useMemo(
-    () => records.filter((r) => r.period_month === compareMonth),
-    [records, compareMonth]
+    () => companyFilteredRecords.filter((r) => r.period_month === compareMonth),
+    [companyFilteredRecords, compareMonth]
   );
 
   // Função agregadora de KPIs para um conjunto de campanhas
@@ -143,7 +228,7 @@ export function ClientPortal({
         conversionInvestment += invested;
       }
 
-      // Alcance total (se reach_impressions preenchido usa ele; em campanha de Alcance soma também results_count se necessário)
+      // Alcance total
       if (reach > 0) {
         totalReach += reach;
       } else if (item.campaign_type === "Reconhecimento / Alcance") {
@@ -280,7 +365,6 @@ export function ClientPortal({
     window.print();
   }
 
-  // Componente interno para renderizar o Badge de evolução no modo Comparar Meses
   function renderEvolutionBadge(
     delta: number | null,
     invertColors = false,
@@ -289,7 +373,6 @@ export function ClientPortal({
     if (viewMode !== "compare" || delta === null) return null;
 
     const isPositiveNumber = delta >= 0;
-    // Para Custo por Conversão, cair (-15%) é positivo (verde)!
     const isGoodOutcome = invertColors ? delta <= 0 : delta >= 0;
     const formattedSign = isPositiveNumber ? "+" : "";
 
@@ -307,13 +390,18 @@ export function ClientPortal({
           {formattedSign}
           {delta.toFixed(1)}%
         </Badge>
-        <span className="text-[11px] text-slate-500">{suffixLabel}</span>
+        <span className="text-[11px] text-slate-500 dark:text-slate-400">
+          {suffixLabel}
+        </span>
       </div>
     );
   }
 
+  const chartGridColor = theme === "dark" ? "#1e293b" : "#e2e8f0";
+  const chartAxisColor = theme === "dark" ? "#94a3b8" : "#475569";
+
   return (
-    <div className="min-h-screen bg-slate-50/70 pb-16">
+    <div className="min-h-screen bg-slate-50/70 dark:bg-slate-950 pb-16 transition-colors">
       {/* =====================================================================
           CABEÇALHO EXCLUSIVO DE IMPRESSÃO A4 (OCULTO NA TELA, VISÍVEL NO PDF)
          ===================================================================== */}
@@ -324,7 +412,7 @@ export function ClientPortal({
               Relatório Executivo de Performance Digital
             </p>
             <h1 className="text-2xl font-bold text-slate-900 mt-0.5">
-              {clientProfile.company_name}
+              {activeCompanyDisplayName}
             </h1>
             <p className="text-xs text-slate-600">
               Aos cuidados de: {clientProfile.client_name}
@@ -349,24 +437,24 @@ export function ClientPortal({
       {/* =====================================================================
           BARRA SUPERIOR DE NAVEGAÇÃO E FILTROS (OCULTA NA IMPRESSÃO .no-print)
          ===================================================================== */}
-      <header className="no-print sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur">
+      <header className="no-print sticky top-0 z-30 border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur">
         <div className="mx-auto max-w-7xl px-4 py-3.5 sm:px-6 lg:px-8">
           <div className="flex flex-wrap items-center justify-between gap-4">
-            {/* Identificação da Empresa Cliente */}
+            {/* Identificação da Empresa Cliente + Seletor de Empresas do Proprietário */}
             <div className="flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white shadow-sm">
                 <BarChart3 className="h-5 w-5" />
               </div>
               <div>
-                <div className="flex items-center gap-2">
-                  <h1 className="text-base font-bold text-slate-900">
-                    {clientProfile.company_name}
+                <div className="flex flex-wrap items-center gap-2">
+                  <h1 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                    {activeCompanyDisplayName}
                   </h1>
                   <Badge variant="secondary" className="text-[11px]">
                     Portal do Cliente
                   </Badge>
                 </div>
-                <p className="text-xs text-slate-500">
+                <p className="text-xs text-slate-500 dark:text-slate-400">
                   Olá, {clientProfile.client_name} • Prestação de Contas de
                   Tráfego Pago
                 </p>
@@ -375,6 +463,37 @@ export function ClientPortal({
 
             {/* Ações Superiores */}
             <div className="flex flex-wrap items-center gap-2.5">
+              {/* Dropdown de Escolha de Empresa (exibido quando o cliente possui mais de 1 empresa) */}
+              {clientCompanies.length > 1 && (
+                <div className="flex items-center gap-1.5 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/70 dark:bg-blue-950/50 px-2.5 py-1">
+                  <Building2 className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
+                  <span className="text-xs font-medium text-slate-600 dark:text-slate-300 hidden sm:inline">
+                    Empresa:
+                  </span>
+                  <select
+                    value={selectedCompany}
+                    onChange={(e) => setSelectedCompany(e.target.value)}
+                    className="bg-transparent text-xs font-bold text-blue-900 dark:text-blue-200 focus:outline-none cursor-pointer"
+                  >
+                    {clientCompanies.map((comp) => (
+                      <option
+                        key={comp}
+                        value={comp}
+                        className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100"
+                      >
+                        {comp}
+                      </option>
+                    ))}
+                    <option
+                      value="ALL_COMPANIES"
+                      className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100"
+                    >
+                      Todas as Empresas ({clientCompanies.length})
+                    </option>
+                  </select>
+                </div>
+              )}
+
               {isAdmin && (
                 <>
                   <select
@@ -382,11 +501,11 @@ export function ClientPortal({
                     onChange={(e) =>
                       router.push(`/portal?client_id=${e.target.value}`)
                     }
-                    className="h-9 rounded-lg border border-blue-200 bg-blue-50/60 px-3 text-xs font-semibold text-blue-900"
+                    className="h-9 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 text-xs font-semibold text-slate-800 dark:text-slate-200"
                   >
                     {allClientsForAdmin.map((c) => (
                       <option key={c.id} value={c.id}>
-                        Cliente: {c.company_name}
+                        Proprietário: {c.client_name} ({c.company_name})
                       </option>
                     ))}
                   </select>
@@ -400,21 +519,24 @@ export function ClientPortal({
                 </>
               )}
 
+              <ThemeToggle />
+
               <Button
                 variant="default"
                 size="sm"
                 onClick={handlePrintReport}
-                className="gap-1.5 bg-slate-900 hover:bg-slate-800 text-white"
+                className="gap-1.5 bg-slate-900 hover:bg-slate-800 dark:bg-blue-600 dark:hover:bg-blue-500 text-white"
               >
                 <Printer className="h-4 w-4" />
-                Imprimir / Salvar PDF
+                <span className="hidden sm:inline">Imprimir / Salvar PDF</span>
+                <span className="sm:hidden">PDF</span>
               </Button>
 
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={handleSignOut}
-                className="gap-1.5 text-slate-600 hover:text-rose-600"
+                className="gap-1.5 text-slate-600 dark:text-slate-300 hover:text-rose-600 dark:hover:text-rose-400"
               >
                 <LogOut className="h-4 w-4" />
                 Sair
@@ -423,19 +545,19 @@ export function ClientPortal({
           </div>
 
           {/* Barra de Filtros: Modo de Visualização e Seletor de Competência */}
-          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-3">
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 dark:border-slate-800 pt-3">
             {/* Toggle Mês Individual vs Comparar Meses */}
-            <div className="inline-flex rounded-lg border border-slate-200 bg-slate-100/80 p-1">
+            <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-100/80 dark:bg-slate-800/80 p-1">
               <button
                 type="button"
                 onClick={() => setViewMode("single")}
                 className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
                   viewMode === "single"
-                    ? "bg-white text-slate-900 shadow-sm"
-                    : "text-slate-600 hover:text-slate-900"
+                    ? "bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-sm"
+                    : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200"
                 }`}
               >
-                <Calendar className="h-3.5 w-3.5 text-blue-600" />
+                <Calendar className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
                 Mês Individual
               </button>
               <button
@@ -443,11 +565,11 @@ export function ClientPortal({
                 onClick={() => setViewMode("compare")}
                 className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
                   viewMode === "compare"
-                    ? "bg-white text-slate-900 shadow-sm"
-                    : "text-slate-600 hover:text-slate-900"
+                    ? "bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-sm"
+                    : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200"
                 }`}
               >
-                <GitCompare className="h-3.5 w-3.5 text-blue-600" />
+                <GitCompare className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
                 Comparar Meses
               </button>
             </div>
@@ -455,13 +577,13 @@ export function ClientPortal({
             {/* Seletores de Competência */}
             <div className="flex flex-wrap items-center gap-3">
               <div className="flex items-center gap-2">
-                <span className="text-xs font-medium text-slate-600">
+                <span className="text-xs font-medium text-slate-600 dark:text-slate-400">
                   Mês Principal:
                 </span>
                 <select
                   value={primaryMonth}
                   onChange={(e) => setPrimaryMonth(e.target.value)}
-                  className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-900 shadow-sm"
+                  className="h-9 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 text-xs font-semibold text-slate-900 dark:text-slate-100 shadow-sm"
                 >
                   {availableMonths.map((m) => (
                     <option key={m} value={m}>
@@ -473,13 +595,13 @@ export function ClientPortal({
 
               {viewMode === "compare" && (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-medium text-slate-600">
+                  <span className="text-xs font-medium text-slate-600 dark:text-slate-400">
                     Comparar com:
                   </span>
                   <select
                     value={compareMonth}
                     onChange={(e) => setCompareMonth(e.target.value)}
-                    className="h-9 rounded-lg border border-blue-200 bg-blue-50/40 px-3 text-xs font-semibold text-blue-900 shadow-sm"
+                    className="h-9 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/40 dark:bg-blue-950/40 px-3 text-xs font-semibold text-blue-900 dark:text-blue-200 shadow-sm"
                   >
                     {availableMonths.map((m) => (
                       <option key={m} value={m}>
@@ -501,17 +623,20 @@ export function ClientPortal({
         {/* Banner Resumo do Período */}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h2 className="text-xl font-bold tracking-tight text-slate-900">
-              Resultados de {formatPeriodMonth(primaryMonth)}
+            <h2 className="text-xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
+              Resultados de {formatPeriodMonth(primaryMonth)} —{" "}
+              <span className="text-blue-600 dark:text-blue-400">
+                {activeCompanyDisplayName}
+              </span>
             </h2>
-            <p className="text-sm text-slate-500">
+            <p className="text-sm text-slate-500 dark:text-slate-400">
               Visão executiva consolidada dos investimentos em anúncios e
               retorno comercial.
             </p>
           </div>
-          <div className="no-print flex items-center gap-1.5 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-full font-medium">
+          <div className="no-print flex items-center gap-1.5 text-xs text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 px-3 py-1.5 rounded-full font-medium">
             <ShieldCheck className="h-4 w-4" />
-            Dados auditados e exclusivos de {clientProfile.company_name}
+            Dados auditados e exclusivos de {activeCompanyDisplayName}
           </div>
         </div>
 
@@ -521,18 +646,18 @@ export function ClientPortal({
           <Card className="border-l-4 border-l-blue-600">
             <CardContent className="p-5">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                   Total Investido
                 </span>
-                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400">
                   <Wallet className="h-5 w-5" />
                 </div>
               </div>
               <div className="mt-3">
-                <p className="text-2xl font-extrabold text-slate-900">
+                <p className="text-2xl font-extrabold text-slate-900 dark:text-slate-100">
                   {formatBRL(currentKPIs.totalInvested)}
                 </p>
-                <p className="text-xs text-slate-500 mt-1">
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                   Verba aplicada em Meta Ads e Google Ads
                 </p>
               </div>
@@ -544,18 +669,18 @@ export function ClientPortal({
           <Card className="border-l-4 border-l-emerald-600">
             <CardContent className="p-5">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                   Total de Conversões
                 </span>
-                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400">
                   <MessageCircle className="h-5 w-5" />
                 </div>
               </div>
               <div className="mt-3">
-                <p className="text-2xl font-extrabold text-slate-900">
+                <p className="text-2xl font-extrabold text-slate-900 dark:text-slate-100">
                   {formatNumber(currentKPIs.totalConversions)}
                 </p>
-                <p className="text-xs text-slate-500 mt-1">
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                   Contatos de WhatsApp, Leads e Vendas
                 </p>
               </div>
@@ -571,24 +696,24 @@ export function ClientPortal({
           <Card className="border-l-4 border-l-indigo-600">
             <CardContent className="p-5">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                   Custo Médio / Conversão
                 </span>
-                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400">
                   <Target className="h-5 w-5" />
                 </div>
               </div>
               <div className="mt-3">
-                <p className="text-2xl font-extrabold text-slate-900">
+                <p className="text-2xl font-extrabold text-slate-900 dark:text-slate-100">
                   {formatBRL(currentKPIs.avgCostPerConversion)}
                 </p>
-                <p className="text-xs text-slate-500 mt-1">
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                   Valor médio investido para gerar 1 contato
                 </p>
               </div>
               {renderEvolutionBadge(
                 deltas.costPerConversion,
-                true, // Custo menor é positivo (verde)!
+                true,
                 "no custo por contato"
               )}
             </CardContent>
@@ -598,18 +723,18 @@ export function ClientPortal({
           <Card className="border-l-4 border-l-amber-500">
             <CardContent className="p-5">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                   Pessoas Impactadas
                 </span>
-                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-50 text-amber-600">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400">
                   <Users className="h-5 w-5" />
                 </div>
               </div>
               <div className="mt-3">
-                <p className="text-2xl font-extrabold text-slate-900">
+                <p className="text-2xl font-extrabold text-slate-900 dark:text-slate-100">
                   {formatNumber(currentKPIs.totalReach)}
                 </p>
-                <p className="text-xs text-slate-500 mt-1">
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                   Alcance / visualizações dos anúncios
                 </p>
               </div>
@@ -620,7 +745,7 @@ export function ClientPortal({
 
         {/* 2. CARD DE PARECER ESTRATÉGICO DO GESTOR (SE HOUVER OBSERVAÇÃO NO MÊS) */}
         {managerObservations.length > 0 && (
-          <Card className="border-blue-200 bg-gradient-to-r from-blue-50/90 via-indigo-50/50 to-white">
+          <Card className="border-blue-200 dark:border-blue-900 bg-gradient-to-r from-blue-50/90 via-indigo-50/50 to-white dark:from-blue-950/40 dark:via-slate-900 dark:to-slate-900">
             <CardContent className="p-6">
               <div className="flex items-start gap-4">
                 <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white shadow-sm">
@@ -629,10 +754,10 @@ export function ClientPortal({
                 <div className="space-y-3 flex-1">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
-                      <h3 className="text-base font-bold text-slate-900">
+                      <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
                         Parecer Estratégico do Gestor de Tráfego
                       </h3>
-                      <p className="text-xs text-slate-600">
+                      <p className="text-xs text-slate-600 dark:text-slate-400">
                         Análise executiva e direcionamento das campanhas em{" "}
                         {formatPeriodMonth(primaryMonth)}
                       </p>
@@ -647,14 +772,14 @@ export function ClientPortal({
                     {managerObservations.map((obsRecord) => (
                       <blockquote
                         key={obsRecord.id}
-                        className="rounded-lg border-l-4 border-blue-500 bg-white/90 p-3.5 text-sm leading-relaxed text-slate-700 shadow-sm"
+                        className="rounded-lg border-l-4 border-blue-500 bg-white/90 dark:bg-slate-900/90 p-3.5 text-sm leading-relaxed text-slate-700 dark:text-slate-200 shadow-sm"
                       >
                         <p className="italic">
                           &ldquo;{obsRecord.observation}&rdquo;
                         </p>
-                        <footer className="mt-1.5 text-xs font-semibold text-slate-500">
+                        <footer className="mt-1.5 text-xs font-semibold text-slate-500 dark:text-slate-400">
                           — Referente à campanha:{" "}
-                          <span className="text-slate-800">
+                          <span className="text-slate-800 dark:text-slate-200">
                             {obsRecord.campaign_name} ({obsRecord.platform})
                           </span>
                         </footer>
@@ -746,15 +871,18 @@ export function ClientPortal({
                       data={barChartData}
                       margin={{ top: 10, right: 16, left: 0, bottom: 10 }}
                     >
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke={chartGridColor}
+                      />
                       <XAxis
                         dataKey="name"
-                        tick={{ fontSize: 11, fill: "#475569" }}
+                        tick={{ fontSize: 11, fill: chartAxisColor }}
                       />
                       <YAxis
                         yAxisId="left"
                         orientation="left"
-                        tick={{ fontSize: 11, fill: "#2563eb" }}
+                        tick={{ fontSize: 11, fill: "#3b82f6" }}
                       />
                       <YAxis
                         yAxisId="right"
@@ -796,7 +924,7 @@ export function ClientPortal({
           <Card>
             <CardHeader>
               <div className="flex items-center gap-2">
-                <Eye className="h-5 w-5 text-blue-600" />
+                <Eye className="h-5 w-5 text-blue-600 dark:text-blue-400" />
                 <CardTitle>
                   Galeria de Anúncios (Criativos em Destaque)
                 </CardTitle>
@@ -812,12 +940,12 @@ export function ClientPortal({
                 {featuredCreatives.map((item) => (
                   <div
                     key={item.id}
-                    className="flex flex-col sm:flex-row gap-4 rounded-xl border border-slate-200 bg-slate-50/50 p-4 hover:border-blue-300 transition-colors print-break-inside-avoid"
+                    className="flex flex-col sm:flex-row gap-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50 p-4 hover:border-blue-300 dark:hover:border-blue-700 transition-colors print-break-inside-avoid"
                   >
                     {/* Imagem do Criativo com Gatilho para Modal de Zoom */}
                     <div
                       onClick={() => setZoomedCreative(item)}
-                      className="group relative h-44 w-full sm:w-44 shrink-0 cursor-pointer overflow-hidden rounded-lg border border-slate-200 bg-slate-900"
+                      className="group relative h-44 w-full sm:w-44 shrink-0 cursor-pointer overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-900"
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
@@ -844,45 +972,45 @@ export function ClientPortal({
                           >
                             {item.platform}
                           </Badge>
-                          <span className="text-xs font-medium text-slate-500">
+                          <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
                             {item.campaign_type}
                           </span>
                         </div>
-                        <h4 className="text-sm font-bold text-slate-900">
+                        <h4 className="text-sm font-bold text-slate-900 dark:text-slate-100">
                           {item.campaign_name}
                         </h4>
                       </div>
 
-                      <div className="mt-3 grid grid-cols-2 gap-2.5 rounded-lg bg-white p-3 border border-slate-200/80">
+                      <div className="mt-3 grid grid-cols-2 gap-2.5 rounded-lg bg-white dark:bg-slate-900 p-3 border border-slate-200/80 dark:border-slate-800">
                         <div>
-                          <p className="text-[11px] text-slate-500">
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400">
                             Investimento
                           </p>
-                          <p className="text-sm font-bold text-slate-900">
+                          <p className="text-sm font-bold text-slate-900 dark:text-slate-100">
                             {formatBRL(Number(item.amount_invested))}
                           </p>
                         </div>
                         <div>
-                          <p className="text-[11px] text-slate-500">
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400">
                             Resultados Gerados
                           </p>
-                          <p className="text-sm font-bold text-emerald-700">
+                          <p className="text-sm font-bold text-emerald-700 dark:text-emerald-400">
                             {formatNumber(Number(item.results_count))}
                           </p>
                         </div>
                         <div>
-                          <p className="text-[11px] text-slate-500">
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400">
                             Custo por Resultado
                           </p>
-                          <p className="text-xs font-semibold text-blue-700">
+                          <p className="text-xs font-semibold text-blue-700 dark:text-blue-400">
                             {formatBRL(Number(item.cost_per_result))}
                           </p>
                         </div>
                         <div>
-                          <p className="text-[11px] text-slate-500">
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400">
                             Pessoas Alcançadas
                           </p>
-                          <p className="text-xs font-semibold text-slate-800">
+                          <p className="text-xs font-semibold text-slate-800 dark:text-slate-200">
                             {item.reach_impressions
                               ? formatNumber(Number(item.reach_impressions))
                               : "—"}
@@ -901,7 +1029,7 @@ export function ClientPortal({
         <Card>
           <CardHeader>
             <div className="flex items-center gap-2">
-              <Layers className="h-5 w-5 text-blue-600" />
+              <Layers className="h-5 w-5 text-blue-600 dark:text-blue-400" />
               <CardTitle>Detalhamento das Campanhas Ativas no Mês</CardTitle>
             </div>
             <CardDescription>
@@ -911,16 +1039,19 @@ export function ClientPortal({
           </CardHeader>
           <CardContent>
             {primaryRecords.length === 0 ? (
-              <div className="py-12 text-center text-sm text-slate-500">
-                Nenhuma campanha registrada para{" "}
+              <div className="py-12 text-center text-sm text-slate-500 dark:text-slate-400">
+                Nenhuma campanha registrada para {activeCompanyDisplayName} em{" "}
                 {formatPeriodMonth(primaryMonth)}.
               </div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse">
                   <thead>
-                    <tr className="border-b border-slate-200 bg-slate-50/80 text-xs font-semibold uppercase tracking-wider text-slate-500">
+                    <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900/60 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                       <th className="py-3.5 px-4">Canal</th>
+                      {selectedCompany === "ALL_COMPANIES" && (
+                        <th className="py-3.5 px-4">Empresa</th>
+                      )}
                       <th className="py-3.5 px-4">Campanha</th>
                       <th className="py-3.5 px-4">Objetivo Estratégico</th>
                       <th className="py-3.5 px-4 text-right">Verba Aplicada</th>
@@ -935,11 +1066,11 @@ export function ClientPortal({
                       </th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-200/70 text-sm">
+                  <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800 text-sm">
                     {primaryRecords.map((rec) => (
                       <tr
                         key={rec.id}
-                        className="hover:bg-slate-50/90 transition-colors"
+                        className="hover:bg-slate-50/90 dark:hover:bg-slate-800/40 transition-colors"
                       >
                         <td className="py-3.5 px-4 whitespace-nowrap">
                           <Badge
@@ -950,25 +1081,30 @@ export function ClientPortal({
                             {rec.platform}
                           </Badge>
                         </td>
-                        <td className="py-3.5 px-4 font-semibold text-slate-900">
+                        {selectedCompany === "ALL_COMPANIES" && (
+                          <td className="py-3.5 px-4 font-medium text-slate-700 dark:text-slate-300">
+                            {rec.company_name}
+                          </td>
+                        )}
+                        <td className="py-3.5 px-4 font-semibold text-slate-900 dark:text-slate-100">
                           {rec.campaign_name}
                         </td>
-                        <td className="py-3.5 px-4 text-slate-600">
+                        <td className="py-3.5 px-4 text-slate-600 dark:text-slate-400">
                           {rec.campaign_type}
                         </td>
-                        <td className="py-3.5 px-4 text-right font-bold text-slate-900 whitespace-nowrap">
+                        <td className="py-3.5 px-4 text-right font-bold text-slate-900 dark:text-slate-100 whitespace-nowrap">
                           {formatBRL(Number(rec.amount_invested))}
                         </td>
-                        <td className="py-3.5 px-4 text-right font-bold text-emerald-700 whitespace-nowrap">
+                        <td className="py-3.5 px-4 text-right font-bold text-emerald-700 dark:text-emerald-400 whitespace-nowrap">
                           {formatNumber(Number(rec.results_count))}
                         </td>
-                        <td className="py-3.5 px-4 text-right font-semibold text-blue-700 whitespace-nowrap">
+                        <td className="py-3.5 px-4 text-right font-semibold text-blue-700 dark:text-blue-400 whitespace-nowrap">
                           {formatBRL(Number(rec.cost_per_result))}
                         </td>
-                        <td className="py-3.5 px-4 text-right text-slate-600 whitespace-nowrap">
+                        <td className="py-3.5 px-4 text-right text-slate-600 dark:text-slate-400 whitespace-nowrap">
                           {rec.campaign_type === "Vendas / E-commerce" &&
                           rec.roas ? (
-                            <span className="inline-flex items-center gap-1 font-semibold text-emerald-700">
+                            <span className="inline-flex items-center gap-1 font-semibold text-emerald-700 dark:text-emerald-400">
                               <TrendingUp className="h-3.5 w-3.5" />
                               ROAS {Number(rec.roas).toFixed(2)}x
                             </span>
@@ -984,17 +1120,20 @@ export function ClientPortal({
                     ))}
                   </tbody>
                   <tfoot>
-                    <tr className="border-t-2 border-slate-300 bg-slate-100/80 font-bold text-slate-900 text-sm">
-                      <td colSpan={3} className="py-3.5 px-4">
+                    <tr className="border-t-2 border-slate-300 dark:border-slate-700 bg-slate-100/80 dark:bg-slate-900 font-bold text-slate-900 dark:text-slate-100 text-sm">
+                      <td
+                        colSpan={selectedCompany === "ALL_COMPANIES" ? 4 : 3}
+                        className="py-3.5 px-4"
+                      >
                         Total Consolidado ({formatPeriodMonth(primaryMonth)})
                       </td>
                       <td className="py-3.5 px-4 text-right">
                         {formatBRL(currentKPIs.totalInvested)}
                       </td>
-                      <td className="py-3.5 px-4 text-right text-emerald-700">
+                      <td className="py-3.5 px-4 text-right text-emerald-700 dark:text-emerald-400">
                         {formatNumber(currentKPIs.totalConversions)} conversões
                       </td>
-                      <td className="py-3.5 px-4 text-right text-blue-700">
+                      <td className="py-3.5 px-4 text-right text-blue-700 dark:text-blue-400">
                         {formatBRL(currentKPIs.avgCostPerConversion)} (média)
                       </td>
                       <td className="py-3.5 px-4 text-right">
@@ -1019,14 +1158,14 @@ export function ClientPortal({
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="relative max-w-3xl w-full overflow-hidden rounded-2xl bg-white shadow-2xl"
+            className="relative max-w-3xl w-full overflow-hidden rounded-2xl bg-white dark:bg-slate-900 shadow-2xl border dark:border-slate-800"
           >
-            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5">
+            <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 px-5 py-3.5">
               <div>
-                <h3 className="text-base font-bold text-slate-900">
+                <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
                   {zoomedCreative.campaign_name}
                 </h3>
-                <p className="text-xs text-slate-500">
+                <p className="text-xs text-slate-500 dark:text-slate-400">
                   {zoomedCreative.platform} • {zoomedCreative.campaign_type}
                 </p>
               </div>
@@ -1048,32 +1187,32 @@ export function ClientPortal({
                   className="max-h-[70vh] w-auto object-contain"
                 />
               </div>
-              <div className="w-full md:w-72 p-5 space-y-4 bg-slate-50 border-t md:border-t-0 md:border-l border-slate-200">
-                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+              <div className="w-full md:w-72 p-5 space-y-4 bg-slate-50 dark:bg-slate-900/90 border-t md:border-t-0 md:border-l border-slate-200 dark:border-slate-800">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                   Performance da Peça
                 </h4>
                 <div className="space-y-3">
-                  <div className="rounded-lg bg-white p-3 border border-slate-200">
-                    <span className="text-xs text-slate-500">
+                  <div className="rounded-lg bg-white dark:bg-slate-800 p-3 border border-slate-200 dark:border-slate-700">
+                    <span className="text-xs text-slate-500 dark:text-slate-400">
                       Valor Investido
                     </span>
-                    <p className="text-lg font-bold text-slate-900">
+                    <p className="text-lg font-bold text-slate-900 dark:text-slate-100">
                       {formatBRL(Number(zoomedCreative.amount_invested))}
                     </p>
                   </div>
-                  <div className="rounded-lg bg-white p-3 border border-slate-200">
-                    <span className="text-xs text-slate-500">
+                  <div className="rounded-lg bg-white dark:bg-slate-800 p-3 border border-slate-200 dark:border-slate-700">
+                    <span className="text-xs text-slate-500 dark:text-slate-400">
                       Resultados Gerados
                     </span>
-                    <p className="text-lg font-bold text-emerald-700">
+                    <p className="text-lg font-bold text-emerald-700 dark:text-emerald-400">
                       {formatNumber(Number(zoomedCreative.results_count))}
                     </p>
                   </div>
-                  <div className="rounded-lg bg-white p-3 border border-slate-200">
-                    <span className="text-xs text-slate-500">
+                  <div className="rounded-lg bg-white dark:bg-slate-800 p-3 border border-slate-200 dark:border-slate-700">
+                    <span className="text-xs text-slate-500 dark:text-slate-400">
                       Custo por Resultado
                     </span>
-                    <p className="text-lg font-bold text-blue-700">
+                    <p className="text-lg font-bold text-blue-700 dark:text-blue-400">
                       {formatBRL(Number(zoomedCreative.cost_per_result))}
                     </p>
                   </div>

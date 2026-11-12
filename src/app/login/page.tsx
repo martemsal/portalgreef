@@ -14,6 +14,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { BarChart3, Lock, Mail, Loader2, ShieldCheck } from "lucide-react";
+import { ThemeToggle } from "@/components/theme/ThemeProvider";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -64,43 +65,46 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col justify-center items-center bg-gradient-to-br from-slate-950 via-slate-900 to-blue-950 px-4 py-12">
+    <div className="relative min-h-screen flex flex-col justify-center items-center bg-gradient-to-br from-slate-100 via-slate-50 to-blue-100 dark:from-slate-950 dark:via-slate-900 dark:to-blue-950 px-4 py-12 transition-colors">
+      <div className="absolute top-4 right-4">
+        <ThemeToggle />
+      </div>
       <div className="w-full max-w-md space-y-6">
         <div className="flex flex-col items-center text-center space-y-2">
-          <div className="h-12 w-12 rounded-2xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400 shadow-lg">
+          <div className="h-12 w-12 rounded-2xl bg-blue-600/15 dark:bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-600 dark:text-blue-400 shadow-lg">
             <BarChart3 className="h-6 w-6" />
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-white">
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
             AdPulse Executive
           </h1>
-          <p className="text-sm text-slate-400 max-w-xs">
+          <p className="text-sm text-slate-600 dark:text-slate-400 max-w-xs">
             Portal de Inteligência, Prestação de Contas e Performance em Tráfego Pago
           </p>
         </div>
 
-        <Card className="border-slate-800 bg-slate-900/90 text-slate-100 backdrop-blur-md shadow-2xl">
+        <Card className="border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-900/90 text-slate-900 dark:text-slate-100 backdrop-blur-md shadow-2xl">
           <CardHeader className="space-y-1 pb-4">
-            <CardTitle className="text-lg font-semibold text-white">
+            <CardTitle className="text-lg font-semibold text-slate-900 dark:text-white">
               Acesse sua conta
             </CardTitle>
-            <CardDescription className="text-slate-400">
+            <CardDescription className="text-slate-500 dark:text-slate-400">
               Insira seu e-mail corporativo e senha para visualizar seus indicadores.
             </CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={handleLogin} className="space-y-4">
               {errorMessage && (
-                <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3.5 py-2.5 text-xs text-rose-300">
+                <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3.5 py-2.5 text-xs text-rose-600 dark:text-rose-300">
                   {errorMessage}
                 </div>
               )}
 
               <div className="space-y-2">
-                <Label htmlFor="email" className="text-slate-300">
+                <Label htmlFor="email" className="text-slate-700 dark:text-slate-300">
                   E-mail
                 </Label>
                 <div className="relative">
-                  <Mail className="h-4 w-4 text-slate-500 absolute left-3 top-3" />
+                  <Mail className="h-4 w-4 text-slate-400 dark:text-slate-500 absolute left-3 top-3" />
                   <Input
                     id="email"
                     type="email"
@@ -108,17 +112,17 @@ export default function LoginPage() {
                     placeholder="voce@empresa.com.br"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    className="pl-9 bg-slate-950/80 border-slate-800 text-slate-100 placeholder:text-slate-500 focus-visible:ring-blue-500"
+                    className="pl-9 bg-slate-50 dark:bg-slate-950/80 border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus-visible:ring-blue-500"
                   />
                 </div>
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="password" className="text-slate-300">
+                <Label htmlFor="password" className="text-slate-700 dark:text-slate-300">
                   Senha
                 </Label>
                 <div className="relative">
-                  <Lock className="h-4 w-4 text-slate-500 absolute left-3 top-3" />
+                  <Lock className="h-4 w-4 text-slate-400 dark:text-slate-500 absolute left-3 top-3" />
                   <Input
                     id="password"
                     type="password"
@@ -126,7 +130,7 @@ export default function LoginPage() {
                     placeholder="••••••••"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    className="pl-9 bg-slate-950/80 border-slate-800 text-slate-100 placeholder:text-slate-500 focus-visible:ring-blue-500"
+                    className="pl-9 bg-slate-50 dark:bg-slate-950/80 border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus-visible:ring-blue-500"
                   />
                 </div>
               </div>
@@ -147,8 +151,8 @@ export default function LoginPage() {
               </Button>
             </form>
 
-            <div className="mt-6 pt-4 border-t border-slate-800/80 flex items-center justify-center gap-2 text-xs text-slate-400">
-              <ShieldCheck className="h-4 w-4 text-emerald-400 shrink-0" />
+            <div className="mt-6 pt-4 border-t border-slate-200 dark:border-slate-800/80 flex items-center justify-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+              <ShieldCheck className="h-4 w-4 text-emerald-500 dark:text-emerald-400 shrink-0" />
               <span>Ambiente seguro com isolamento de dados por cliente (RLS)</span>
             </div>
           </CardContent>

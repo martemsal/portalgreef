@@ -26,6 +26,7 @@ export interface Profile {
   role: UserRole;
   client_name: string;
   company_name: string;
+  companies?: string[];
   email?: string | null;
   created_at: string;
 }
@@ -33,6 +34,7 @@ export interface Profile {
 export interface CampaignRecord {
   id: string;
   client_id: string;
+  company_name?: string;
   period_month: string; // YYYY-MM
   platform: AdPlatform;
   campaign_type: CampaignType;
@@ -58,7 +60,7 @@ export const createClientSchema = z.object({
     .min(2, "Informe o nome do responsável (mín. 2 caracteres)."),
   company_name: z
     .string()
-    .min(2, "Informe o nome da empresa (mín. 2 caracteres)."),
+    .min(2, "Informe pelo menos uma empresa (mín. 2 caracteres)."),
   email: z.string().email("Informe um e-mail válido."),
   password: z
     .string()
@@ -68,10 +70,80 @@ export const createClientSchema = z.object({
 export type CreateClientFormValues = z.infer<typeof createClientSchema>;
 
 /**
+ * Schema Zod para edição de cliente existente pelo Administrador
+ */
+export const updateClientSchema = z.object({
+  id: z.string().uuid("ID de cliente inválido."),
+  client_name: z
+    .string()
+    .min(2, "Informe o nome do responsável (mín. 2 caracteres)."),
+  company_name: z
+    .string()
+    .min(2, "Informe pelo menos uma empresa (mín. 2 caracteres)."),
+  email: z.string().email("Informe um e-mail válido."),
+  password: z
+    .string()
+    .optional()
+    .or(z.literal("")),
+});
+
+export type UpdateClientFormValues = z.infer<typeof updateClientSchema>;
+
+/**
+ * Utilitário para extrair a lista de empresas de um perfil
+ * (suporta empresas separadas por vírgula em `company_name` ou array em `companies`)
+ */
+export function getProfileCompanies(profile?: Pick<Profile, "company_name" | "companies"> | null): string[] {
+  if (!profile) return [];
+  if (Array.isArray(profile.companies) && profile.companies.length > 0) {
+    return profile.companies.map((c) => c.trim()).filter(Boolean);
+  }
+  if (!profile.company_name) return [];
+  return profile.company_name
+    .split(",")
+    .map((c) => c.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Extrai a empresa vinculada a uma campanha (caso `company_name` não exista como coluna no banco,
+ * lê um prefixo opcional `[[Empresa]] ` na campanha ou retorna a empresa principal do cliente).
+ */
+export function unpackCampaignCompany(
+  rawCampaignName: string,
+  explicitCompanyName?: string | null,
+  fallbackCompany?: string
+): { companyName: string; cleanCampaignName: string } {
+  const match = rawCampaignName.match(/^\[\[(.+?)\]\]\s*(.*)$/);
+  if (match) {
+    return {
+      companyName: explicitCompanyName || match[1].trim(),
+      cleanCampaignName: match[2].trim() || rawCampaignName,
+    };
+  }
+  return {
+    companyName: explicitCompanyName || fallbackCompany || "Empresa Principal",
+    cleanCampaignName: rawCampaignName,
+  };
+}
+
+export function packCampaignNameWithCompany(
+  cleanCampaignName: string,
+  companyName?: string | null
+): string {
+  const trimmedName = cleanCampaignName.replace(/^\[\[(.+?)\]\]\s*/, "").trim();
+  if (!companyName || !companyName.trim()) {
+    return trimmedName;
+  }
+  return `[[${companyName.trim()}]] ${trimmedName}`;
+}
+
+/**
  * Schema Zod para lançamento/edição de campanha
  */
 export const campaignRecordSchema = z.object({
   client_id: z.string().uuid("Selecione um cliente válido."),
+  company_name: z.string().min(1, "Selecione a empresa da campanha."),
   period_month: z
     .string()
     .regex(/^\d{4}-(0[1-9]|1[0-2])$/, "Use o formato AAAA-MM (ex: 2026-11)."),

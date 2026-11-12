@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo, useRef } from "react";
+import React, { useState, useMemo, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -12,6 +12,9 @@ import {
   type CreateClientFormValues,
   campaignRecordSchema,
   createClientSchema,
+  getProfileCompanies,
+  packCampaignNameWithCompany,
+  unpackCampaignCompany,
   PLATFORMS,
   CAMPAIGN_TYPES,
 } from "@/types/database";
@@ -27,6 +30,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { ThemeToggle } from "@/components/theme/ThemeProvider";
 import {
   BarChart3,
   Building2,
@@ -37,10 +41,12 @@ import {
   ImagePlus,
   Loader2,
   LogOut,
+  Plus,
   PlusCircle,
   Sparkles,
   Trash2,
   UploadCloud,
+  UserCheck,
   UserPlus,
   Users,
   X,
@@ -62,9 +68,14 @@ export function AdminDashboard({
 
   const [clients, setClients] = useState<Profile[]>(initialClients);
   const [records, setRecords] = useState<CampaignRecord[]>(initialRecords);
+  const [editingClientId, setEditingClientId] = useState<string | null>(null);
   const [editingRecordId, setEditingRecordId] = useState<string | null>(null);
   const [filterClientId, setFilterClientId] = useState<string>("all");
   const [filterMonth, setFilterMonth] = useState<string>("all");
+
+  // Estados para gerenciamento de múltiplas empresas no formulário de cliente
+  const [companiesList, setCompaniesList] = useState<string[]>([]);
+  const [companyDraft, setCompanyDraft] = useState<string>("");
 
   // Estados de feedback
   const [clientSuccessMsg, setClientSuccessMsg] = useState<string | null>(null);
@@ -76,6 +87,7 @@ export function AdminDashboard({
   const [uploadingImage, setUploadingImage] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const clientFormRef = useRef<HTMLDivElement | null>(null);
   const launchFormRef = useRef<HTMLDivElement | null>(null);
 
   // Mês padrão YYYY-MM
@@ -87,13 +99,14 @@ export function AdminDashboard({
   }, []);
 
   // =========================================================================
-  // 1. FORMULÁRIO DE CADASTRO DE CLIENTES (React Hook Form + Zod)
+  // 1. FORMULÁRIO DE CADASTRO / EDIÇÃO DE CLIENTES (React Hook Form + Zod)
   // =========================================================================
   const {
     register: registerClient,
     handleSubmit: handleClientSubmit,
     reset: resetClientForm,
-    formState: { errors: clientErrors, isSubmitting: isCreatingClient },
+    setValue: setClientValue,
+    formState: { errors: clientErrors, isSubmitting: isSubmittingClient },
   } = useForm<CreateClientFormValues>({
     resolver: zodResolver(createClientSchema),
     defaultValues: {
@@ -104,34 +117,168 @@ export function AdminDashboard({
     },
   });
 
-  async function onCreateClientSubmit(values: CreateClientFormValues) {
+  // Sincroniza `companiesList` com o campo `company_name` (separado por vírgula)
+  function syncCompaniesToForm(list: string[], draftValue?: string) {
+    const combined = [...list];
+    const extra = (draftValue ?? companyDraft).trim();
+    if (extra && !combined.includes(extra)) {
+      combined.push(extra);
+    }
+    setClientValue("company_name", combined.join(", "), {
+      shouldValidate: combined.length > 0,
+    });
+  }
+
+  function handleAddCompanyToList() {
+    const trimmed = companyDraft.trim();
+    if (!trimmed) return;
+    if (companiesList.includes(trimmed)) {
+      setCompanyDraft("");
+      return;
+    }
+    const next = [...companiesList, trimmed];
+    setCompaniesList(next);
+    setCompanyDraft("");
+    setClientValue("company_name", next.join(", "), { shouldValidate: true });
+  }
+
+  function handleRemoveCompanyFromList(companyToRemove: string) {
+    const next = companiesList.filter((c) => c !== companyToRemove);
+    setCompaniesList(next);
+    syncCompaniesToForm(next, companyDraft);
+  }
+
+  function handleStartEditClient(client: Profile) {
+    setEditingClientId(client.id);
+    setClientErrorMsg(null);
+    setClientSuccessMsg(null);
+    const parsedCompanies = getProfileCompanies(client);
+    setCompaniesList(parsedCompanies);
+    setCompanyDraft("");
+    resetClientForm({
+      client_name: client.client_name,
+      company_name: parsedCompanies.join(", "),
+      email: client.email ?? "",
+      password: "******", // Placeholder para passar na validação caso não queira alterar a senha
+    });
+    clientFormRef.current?.scrollIntoView({ behavior: "smooth" });
+  }
+
+  function handleCancelEditClient() {
+    setEditingClientId(null);
+    setCompaniesList([]);
+    setCompanyDraft("");
+    setClientErrorMsg(null);
+    resetClientForm({
+      client_name: "",
+      company_name: "",
+      email: "",
+      password: "",
+    });
+  }
+
+  async function onClientFormSubmit(values: CreateClientFormValues) {
     setClientErrorMsg(null);
     setClientSuccessMsg(null);
 
+    // Garante que qualquer empresa digitada no campo de rascunho ou lista entre no envio
+    const finalCompanies = [...companiesList];
+    if (companyDraft.trim() && !finalCompanies.includes(companyDraft.trim())) {
+      finalCompanies.push(companyDraft.trim());
+    }
+    const finalCompanyNameString =
+      finalCompanies.length > 0
+        ? finalCompanies.join(", ")
+        : values.company_name
+            .split(",")
+            .map((c) => c.trim())
+            .filter(Boolean)
+            .join(", ");
+
+    if (!finalCompanyNameString || finalCompanyNameString.length < 2) {
+      setClientErrorMsg("Informe pelo menos uma empresa para o cliente.");
+      return;
+    }
+
     try {
-      const response = await fetch("/api/admin/clients", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(values),
-      });
+      if (editingClientId) {
+        // Se a senha for apenas o placeholder '******', envia vazio para não alterar
+        const passwordToSend =
+          values.password === "******" ? "" : values.password.trim();
 
-      const data = await response.json();
-      if (!response.ok) {
-        setClientErrorMsg(data.error || "Erro ao cadastrar cliente.");
-        return;
+        const response = await fetch("/api/admin/clients", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: editingClientId,
+            client_name: values.client_name.trim(),
+            company_name: finalCompanyNameString,
+            email: values.email.trim(),
+            password: passwordToSend,
+          }),
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+          setClientErrorMsg(data.error || "Erro ao atualizar cliente.");
+          return;
+        }
+
+        const updatedClient = data.profile as Profile;
+        setClients((prev) =>
+          prev
+            .map((c) => (c.id === editingClientId ? updatedClient : c))
+            .sort((a, b) => a.company_name.localeCompare(b.company_name))
+        );
+        setEditingClientId(null);
+        setCompaniesList([]);
+        setCompanyDraft("");
+        resetClientForm({
+          client_name: "",
+          company_name: "",
+          email: "",
+          password: "",
+        });
+        setClientSuccessMsg(
+          `Cliente "${updatedClient.client_name}" atualizado com sucesso!`
+        );
+      } else {
+        const response = await fetch("/api/admin/clients", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...values,
+            company_name: finalCompanyNameString,
+          }),
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+          setClientErrorMsg(data.error || "Erro ao cadastrar cliente.");
+          return;
+        }
+
+        const newClient = data.profile as Profile;
+        setClients((prev) =>
+          [...prev, newClient].sort((a, b) =>
+            a.company_name.localeCompare(b.company_name)
+          )
+        );
+        const firstCompany = getProfileCompanies(newClient)[0] ?? newClient.company_name;
+        setValue("client_id", newClient.id);
+        setValue("company_name", firstCompany);
+        setCompaniesList([]);
+        setCompanyDraft("");
+        resetClientForm({
+          client_name: "",
+          company_name: "",
+          email: "",
+          password: "",
+        });
+        setClientSuccessMsg(
+          `Cliente "${newClient.client_name}" cadastrado com sucesso!`
+        );
       }
-
-      const newClient = data.profile as Profile;
-      setClients((prev) =>
-        [...prev, newClient].sort((a, b) =>
-          a.company_name.localeCompare(b.company_name)
-        )
-      );
-      setValue("client_id", newClient.id);
-      resetClientForm();
-      setClientSuccessMsg(
-        `Cliente "${newClient.company_name}" cadastrado com sucesso!`
-      );
     } catch {
       setClientErrorMsg("Falha de comunicação com o servidor.");
     }
@@ -140,6 +287,12 @@ export function AdminDashboard({
   // =========================================================================
   // 2. FORMULÁRIO DE LANÇAMENTO DE CAMPANHAS (React Hook Form + Zod)
   // =========================================================================
+  const defaultFirstClient = initialClients[0];
+  const defaultFirstCompany =
+    getProfileCompanies(defaultFirstClient)[0] ??
+    defaultFirstClient?.company_name ??
+    "";
+
   const {
     register,
     handleSubmit,
@@ -150,7 +303,8 @@ export function AdminDashboard({
   } = useForm<CampaignRecordFormValues>({
     resolver: zodResolver(campaignRecordSchema),
     defaultValues: {
-      client_id: initialClients[0]?.id ?? "",
+      client_id: defaultFirstClient?.id ?? "",
+      company_name: defaultFirstCompany,
       period_month: defaultPeriodMonth,
       platform: "Meta Ads",
       campaign_type: "WhatsApp / Mensagens",
@@ -172,6 +326,27 @@ export function AdminDashboard({
   const watchedRevenueGenerated = Number(watch("revenue_generated") || 0);
   const watchedCreativeUrl = watch("creative_image_url");
   const watchedClientId = watch("client_id");
+  const watchedCompanyName = watch("company_name");
+
+  // Lista de empresas disponíveis para o cliente atualmente selecionado no lançamento
+  const selectedClientObj = useMemo(
+    () => clients.find((c) => c.id === watchedClientId),
+    [clients, watchedClientId]
+  );
+
+  const selectedClientCompanies = useMemo(
+    () => getProfileCompanies(selectedClientObj),
+    [selectedClientObj]
+  );
+
+  // Quando o cliente muda no formulário de lançamento, garante que a empresa selecionada pertença a ele
+  useEffect(() => {
+    if (!selectedClientObj) return;
+    const companies = getProfileCompanies(selectedClientObj);
+    if (companies.length > 0 && !companies.includes(watchedCompanyName)) {
+      setValue("company_name", companies[0]);
+    }
+  }, [selectedClientObj, watchedCompanyName, setValue]);
 
   // Cálculos Automáticos Dinâmicos conforme o Objetivo da Campanha
   const calculatedMetrics = useMemo(() => {
@@ -185,7 +360,6 @@ export function AdminDashboard({
         ? watchedRevenueGenerated / watchedAmountInvested
         : 0;
 
-    // Para Reconhecimento / Alcance, CPM = (Investimento / Impressões ou Resultados) * 1000
     const impressionsBase =
       watchedReachImpressions > 0
         ? watchedReachImpressions
@@ -313,12 +487,18 @@ export function AdminDashboard({
         ? Number((values.revenue_generated / values.amount_invested).toFixed(2))
         : values.roas ?? null;
 
+    // Empacota o nome da empresa junto ao campaign_name para funcionar sem exigir migração SQL obrigatória
+    const packedCampaignName = packCampaignNameWithCompany(
+      values.campaign_name,
+      values.company_name
+    );
+
     const payload = {
       client_id: values.client_id,
       period_month: values.period_month,
       platform: values.platform,
       campaign_type: values.campaign_type,
-      campaign_name: values.campaign_name,
+      campaign_name: packedCampaignName,
       amount_invested: values.amount_invested,
       results_count: values.results_count,
       reach_impressions: values.reach_impressions ?? null,
@@ -365,9 +545,10 @@ export function AdminDashboard({
         setRecordSuccessMsg("Campanha registrada com sucesso!");
       }
 
-      // Mantém cliente e mês selecionados para agilizar múltiplos lançamentos
+      // Mantém cliente, empresa e mês selecionados para agilizar múltiplos lançamentos
       reset({
         client_id: values.client_id,
+        company_name: values.company_name,
         period_month: values.period_month,
         platform: values.platform,
         campaign_type: values.campaign_type,
@@ -387,7 +568,11 @@ export function AdminDashboard({
 
   function handleQuickSelectClient(clientId: string) {
     setEditingRecordId(null);
+    const targetClient = clients.find((c) => c.id === clientId);
+    const firstCompany =
+      getProfileCompanies(targetClient)[0] ?? targetClient?.company_name ?? "";
     setValue("client_id", clientId);
+    setValue("company_name", firstCompany);
     setFilterClientId(clientId);
     launchFormRef.current?.scrollIntoView({ behavior: "smooth" });
   }
@@ -396,12 +581,25 @@ export function AdminDashboard({
     setEditingRecordId(record.id);
     setRecordErrorMsg(null);
     setRecordSuccessMsg(null);
+
+    const ownerClient = clients.find((c) => c.id === record.client_id);
+    const fallbackCompany =
+      getProfileCompanies(ownerClient)[0] ??
+      ownerClient?.company_name ??
+      "Empresa Principal";
+    const { companyName, cleanCampaignName } = unpackCampaignCompany(
+      record.campaign_name,
+      record.company_name,
+      fallbackCompany
+    );
+
     reset({
       client_id: record.client_id,
+      company_name: companyName,
       period_month: record.period_month,
       platform: record.platform,
       campaign_type: record.campaign_type,
-      campaign_name: record.campaign_name,
+      campaign_name: cleanCampaignName,
       amount_invested: Number(record.amount_invested),
       results_count: Number(record.results_count),
       reach_impressions:
@@ -464,9 +662,9 @@ export function AdminDashboard({
   }, [records, filterClientId, filterMonth]);
 
   return (
-    <div className="min-h-screen bg-slate-50/80 pb-16">
+    <div className="min-h-screen bg-slate-50/80 dark:bg-slate-950 pb-16 transition-colors">
       {/* BARRA DE NAVEGAÇÃO SUPERIOR */}
-      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur">
+      <header className="sticky top-0 z-30 border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3.5 sm:px-6 lg:px-8">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white shadow-sm">
@@ -474,20 +672,21 @@ export function AdminDashboard({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold text-slate-900">
+                <h1 className="text-base font-bold text-slate-900 dark:text-slate-100">
                   Painel do Gestor de Tráfego
                 </h1>
                 <Badge variant="default" className="text-[11px]">
                   Admin
                 </Badge>
               </div>
-              <p className="text-xs text-slate-500">
+              <p className="text-xs text-slate-500 dark:text-slate-400">
                 Logado como {adminProfile.client_name} ({adminProfile.company_name})
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2.5">
+            <ThemeToggle />
             <Button
               variant="outline"
               size="sm"
@@ -495,13 +694,14 @@ export function AdminDashboard({
               className="gap-1.5"
             >
               <ExternalLink className="h-3.5 w-3.5" />
-              Ver Visão do Cliente (/portal)
+              <span className="hidden sm:inline">Ver Visão do Cliente (/portal)</span>
+              <span className="sm:hidden">Portal</span>
             </Button>
             <Button
               variant="ghost"
               size="sm"
               onClick={handleSignOut}
-              className="gap-1.5 text-slate-600 hover:text-rose-600"
+              className="gap-1.5 text-slate-600 dark:text-slate-300 hover:text-rose-600 dark:hover:text-rose-400"
             >
               <LogOut className="h-4 w-4" />
               Sair
@@ -512,64 +712,143 @@ export function AdminDashboard({
 
       <main className="mx-auto max-w-7xl space-y-8 px-4 pt-8 sm:px-6 lg:px-8">
         {/* SEÇÃO 1: GESTÃO DE CLIENTES */}
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-          {/* Card Cadastro de Novo Cliente */}
-          <Card className="lg:col-span-5">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-12" ref={clientFormRef}>
+          {/* Card Cadastro / Edição de Cliente */}
+          <Card
+            className={`lg:col-span-5 ${
+              editingClientId ? "border-blue-500 ring-1 ring-blue-500/30" : ""
+            }`}
+          >
             <CardHeader className="pb-4">
-              <div className="flex items-center gap-2">
-                <UserPlus className="h-5 w-5 text-blue-600" />
-                <CardTitle>Cadastrar Novo Cliente</CardTitle>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  {editingClientId ? (
+                    <UserCheck className="h-5 w-5 text-blue-600 dark:text-blue-400" />
+                  ) : (
+                    <UserPlus className="h-5 w-5 text-blue-600 dark:text-blue-400" />
+                  )}
+                  <CardTitle>
+                    {editingClientId
+                      ? "Editar Cliente & Empresas"
+                      : "Cadastrar Novo Cliente"}
+                  </CardTitle>
+                </div>
+                {editingClientId && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleCancelEditClient}
+                    className="h-7 px-2 text-xs text-slate-500"
+                  >
+                    <X className="h-3.5 w-3.5 mr-1" />
+                    Cancelar
+                  </Button>
+                )}
               </div>
               <CardDescription>
-                Cria o acesso no Supabase Auth e vincula automaticamente ao perfil
-                isolado por RLS.
+                {editingClientId
+                  ? "Atualize os dados do proprietário, adicione ou remova empresas vinculadas a este acesso."
+                  : "Cadastre o proprietário e adicione uma ou mais empresas que ele possui para gerenciar."}
               </CardDescription>
             </CardHeader>
             <CardContent>
               <form
-                onSubmit={handleClientSubmit(onCreateClientSubmit)}
+                onSubmit={handleClientSubmit(onClientFormSubmit)}
                 className="space-y-3.5"
               >
                 {clientErrorMsg && (
-                  <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
+                  <div className="rounded-lg border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/50 p-3 text-xs text-rose-700 dark:text-rose-300">
                     {clientErrorMsg}
                   </div>
                 )}
                 {clientSuccessMsg && (
-                  <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-700">
+                  <div className="flex items-center gap-2 rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/50 p-3 text-xs text-emerald-700 dark:text-emerald-300">
                     <CheckCircle2 className="h-4 w-4 shrink-0" />
                     <span>{clientSuccessMsg}</span>
                   </div>
                 )}
 
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="client_name">Nome do Cliente</Label>
+                <div className="space-y-1.5">
+                  <Label htmlFor="client_name">Nome do Proprietário / Cliente</Label>
+                  <Input
+                    id="client_name"
+                    placeholder="Ex: Dr. Roberto Silva"
+                    {...registerClient("client_name")}
+                  />
+                  {clientErrors.client_name && (
+                    <p className="text-xs text-rose-600 dark:text-rose-400">
+                      {clientErrors.client_name.message}
+                    </p>
+                  )}
+                </div>
+
+                {/* Gerenciador de Múltiplas Empresas do Cliente */}
+                <div className="space-y-2">
+                  <Label htmlFor="company_draft">
+                    Empresas deste Cliente (pode adicionar várias)
+                  </Label>
+                  <div className="flex gap-2">
                     <Input
-                      id="client_name"
-                      placeholder="Ex: Dr. Roberto Silva"
-                      {...registerClient("client_name")}
+                      id="company_draft"
+                      placeholder="Digite o nome da empresa e clique em +"
+                      value={companyDraft}
+                      onChange={(e) => {
+                        setCompanyDraft(e.target.value);
+                        syncCompaniesToForm(companiesList, e.target.value);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          handleAddCompanyToList();
+                        }
+                      }}
                     />
-                    {clientErrors.client_name && (
-                      <p className="text-xs text-rose-600">
-                        {clientErrors.client_name.message}
-                      </p>
-                    )}
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={handleAddCompanyToList}
+                      className="shrink-0 gap-1"
+                      title="Adicionar empresa à lista deste cliente"
+                    >
+                      <Plus className="h-4 w-4" />
+                      Adicionar
+                    </Button>
                   </div>
 
-                  <div className="space-y-1.5">
-                    <Label htmlFor="company_name">Empresa</Label>
-                    <Input
-                      id="company_name"
-                      placeholder="Ex: Clínica Vida Plena"
-                      {...registerClient("company_name")}
-                    />
-                    {clientErrors.company_name && (
-                      <p className="text-xs text-rose-600">
-                        {clientErrors.company_name.message}
-                      </p>
-                    )}
-                  </div>
+                  <input type="hidden" {...registerClient("company_name")} />
+
+                  {companiesList.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      {companiesList.map((comp) => (
+                        <span
+                          key={comp}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/60 px-2.5 py-1 text-xs font-medium text-blue-800 dark:text-blue-200"
+                        >
+                          <Building2 className="h-3 w-3 text-blue-600 dark:text-blue-400" />
+                          {comp}
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveCompanyFromList(comp)}
+                            className="ml-0.5 rounded-full p-0.5 hover:bg-blue-200/60 dark:hover:bg-blue-800/60"
+                            title="Remover empresa"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Dica: Adicione cada empresa do cliente acima (ou separe por vírgula). Ele poderá alternar entre elas no dropdown do portal.
+                  </p>
+
+                  {clientErrors.company_name && (
+                    <p className="text-xs text-rose-600 dark:text-rose-400">
+                      {clientErrors.company_name.message}
+                    </p>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -582,22 +861,30 @@ export function AdminDashboard({
                       {...registerClient("email")}
                     />
                     {clientErrors.email && (
-                      <p className="text-xs text-rose-600">
+                      <p className="text-xs text-rose-600 dark:text-rose-400">
                         {clientErrors.email.message}
                       </p>
                     )}
                   </div>
 
                   <div className="space-y-1.5">
-                    <Label htmlFor="client_password">Senha Temporária</Label>
+                    <Label htmlFor="client_password">
+                      {editingClientId
+                        ? "Nova Senha (Opcional)"
+                        : "Senha Temporária"}
+                    </Label>
                     <Input
                       id="client_password"
                       type="text"
-                      placeholder="Mínimo 6 caracteres"
+                      placeholder={
+                        editingClientId
+                          ? "Deixe ****** para manter"
+                          : "Mínimo 6 caracteres"
+                      }
                       {...registerClient("password")}
                     />
                     {clientErrors.password && (
-                      <p className="text-xs text-rose-600">
+                      <p className="text-xs text-rose-600 dark:text-rose-400">
                         {clientErrors.password.message}
                       </p>
                     )}
@@ -606,13 +893,20 @@ export function AdminDashboard({
 
                 <Button
                   type="submit"
-                  disabled={isCreatingClient}
+                  disabled={isSubmittingClient}
                   className="w-full gap-2"
                 >
-                  {isCreatingClient ? (
+                  {isSubmittingClient ? (
                     <>
                       <Loader2 className="h-4 w-4 animate-spin" />
-                      Criando Conta do Cliente...
+                      {editingClientId
+                        ? "Salvando Alterações..."
+                        : "Criando Conta do Cliente..."}
+                    </>
+                  ) : editingClientId ? (
+                    <>
+                      <Edit3 className="h-4 w-4" />
+                      Salvar Alterações do Cliente
                     </>
                   ) : (
                     <>
@@ -630,51 +924,79 @@ export function AdminDashboard({
             <CardHeader className="pb-4">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <Users className="h-5 w-5 text-blue-600" />
+                  <Users className="h-5 w-5 text-blue-600 dark:text-blue-400" />
                   <CardTitle>Carteira de Clientes ({clients.length})</CardTitle>
                 </div>
               </div>
               <CardDescription>
-                Selecione um cliente para lançar resultados mensais ou abrir o
-                relatório executivo dele.
+                Selecione um cliente para lançar resultados, editar suas empresas
+                ou abrir o relatório executivo dele.
               </CardDescription>
             </CardHeader>
             <CardContent>
               {clients.length === 0 ? (
-                <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 py-10 text-center">
+                <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-slate-200 dark:border-slate-800 py-10 text-center">
                   <Building2 className="h-8 w-8 text-slate-400 mb-2" />
-                  <p className="text-sm font-medium text-slate-700">
+                  <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
                     Nenhum cliente cadastrado ainda
                   </p>
-                  <p className="text-xs text-slate-500 mt-1">
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                     Utilize o formulário ao lado para criar o primeiro acesso.
                   </p>
                 </div>
               ) : (
-                <div className="max-h-[270px] overflow-y-auto divide-y divide-slate-100 rounded-lg border border-slate-200">
+                <div className="max-h-[340px] overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800 rounded-lg border border-slate-200 dark:border-slate-800">
                   {clients.map((client) => {
                     const clientRecordsCount = records.filter(
                       (r) => r.client_id === client.id
                     ).length;
+                    const clientCompanies = getProfileCompanies(client);
 
                     return (
                       <div
                         key={client.id}
-                        className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 hover:bg-slate-50 transition-colors"
+                        className="flex flex-wrap items-center justify-between gap-3 px-4 py-3.5 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors"
                       >
-                        <div>
-                          <p className="text-sm font-semibold text-slate-900">
-                            {client.company_name}
-                          </p>
-                          <p className="text-xs text-slate-500">
-                            Responsável: {client.client_name} •{" "}
-                            <span className="text-slate-600 font-medium">
-                              {clientRecordsCount} campanha(s)
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                              {client.client_name}
+                            </p>
+                            {client.email && (
+                              <span className="text-xs text-slate-400">
+                                ({client.email})
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {clientCompanies.map((comp) => (
+                              <Badge
+                                key={comp}
+                                variant="secondary"
+                                className="text-[11px] font-medium gap-1"
+                              >
+                                <Building2 className="h-3 w-3 text-blue-600 dark:text-blue-400" />
+                                {comp}
+                              </Badge>
+                            ))}
+                            <span className="text-xs text-slate-500 dark:text-slate-400 ml-1">
+                              • {clientRecordsCount} campanha(s)
                             </span>
-                          </p>
+                          </div>
                         </div>
 
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => handleStartEditClient(client)}
+                            className="gap-1"
+                            title="Editar cliente e adicionar/remover empresas"
+                          >
+                            <Edit3 className="h-3.5 w-3.5" />
+                            Editar
+                          </Button>
                           <Button
                             type="button"
                             size="sm"
@@ -710,11 +1032,11 @@ export function AdminDashboard({
 
         {/* SEÇÃO 2: FORMULÁRIO DE LANÇAMENTO MANUAL DINÂMICO */}
         <div ref={launchFormRef}>
-          <Card className="border-blue-200/80 shadow-md">
-            <CardHeader className="border-b border-slate-100 bg-slate-50/60 rounded-t-xl">
+          <Card className="border-blue-200/80 dark:border-blue-900/60 shadow-md">
+            <CardHeader className="border-b border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/50 rounded-t-xl">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2.5">
-                  <Sparkles className="h-5 w-5 text-blue-600" />
+                  <Sparkles className="h-5 w-5 text-blue-600 dark:text-blue-400" />
                   <div>
                     <CardTitle className="text-lg">
                       {editingRecordId
@@ -722,9 +1044,8 @@ export function AdminDashboard({
                         : "Lançamento Manual de Resultados de Tráfego"}
                     </CardTitle>
                     <CardDescription>
-                      Os campos e indicadores de eficiência (CPL, Custo por
-                      Conversa, ROAS, CPM) se ajustam automaticamente conforme o
-                      objetivo.
+                      Selecione o cliente, escolha para qual empresa dele é o
+                      lançamento e preencha os indicadores.
                     </CardDescription>
                   </div>
                 </div>
@@ -738,6 +1059,7 @@ export function AdminDashboard({
                       setEditingRecordId(null);
                       reset({
                         client_id: watchedClientId,
+                        company_name: watchedCompanyName,
                         period_month: defaultPeriodMonth,
                         platform: "Meta Ads",
                         campaign_type: "WhatsApp / Mensagens",
@@ -751,7 +1073,7 @@ export function AdminDashboard({
                         observation: "",
                       });
                     }}
-                    className="gap-1.5 text-slate-600"
+                    className="gap-1.5 text-slate-600 dark:text-slate-300"
                   >
                     <X className="h-4 w-4" />
                     Cancelar Edição
@@ -766,37 +1088,61 @@ export function AdminDashboard({
                 className="space-y-6"
               >
                 {recordErrorMsg && (
-                  <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                  <div className="rounded-lg border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/50 px-4 py-3 text-sm text-rose-700 dark:text-rose-300">
                     {recordErrorMsg}
                   </div>
                 )}
 
                 {recordSuccessMsg && (
-                  <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+                  <div className="flex items-center gap-2 rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/50 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-300">
                     <CheckCircle2 className="h-4 w-4 shrink-0" />
                     <span>{recordSuccessMsg}</span>
                   </div>
                 )}
 
-                {/* Linha 1: Cliente, Mês de Referência, Plataforma e Objetivo */}
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                {/* Linha 1: Cliente, Empresa do Cliente, Mês de Referência, Plataforma e Objetivo */}
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
                   <div className="space-y-1.5">
-                    <Label htmlFor="client_id">Cliente *</Label>
+                    <Label htmlFor="client_id">Cliente (Proprietário) *</Label>
                     <select
                       id="client_id"
                       {...register("client_id")}
-                      className="flex h-10 w-full rounded-lg border border-input bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      className="flex h-10 w-full rounded-lg border border-input bg-white dark:bg-slate-900 dark:border-slate-700 dark:text-slate-100 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
                       <option value="">Selecione um cliente...</option>
                       {clients.map((c) => (
                         <option key={c.id} value={c.id}>
-                          {c.company_name} ({c.client_name})
+                          {c.client_name} ({c.company_name})
                         </option>
                       ))}
                     </select>
                     {errors.client_id && (
-                      <p className="text-xs text-rose-600">
+                      <p className="text-xs text-rose-600 dark:text-rose-400">
                         {errors.client_id.message}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <Label htmlFor="company_name">Empresa da Campanha *</Label>
+                    <select
+                      id="company_name"
+                      {...register("company_name")}
+                      className="flex h-10 w-full rounded-lg border border-input bg-white dark:bg-slate-900 dark:border-slate-700 dark:text-slate-100 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      {selectedClientCompanies.length === 0 ? (
+                        <option value="">Selecione o cliente primeiro...</option>
+                      ) : (
+                        selectedClientCompanies.map((comp) => (
+                          <option key={comp} value={comp}>
+                            {comp}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                    {errors.company_name && (
+                      <p className="text-xs text-rose-600 dark:text-rose-400">
+                        {errors.company_name.message}
                       </p>
                     )}
                   </div>
@@ -813,7 +1159,7 @@ export function AdminDashboard({
                       />
                     </div>
                     {errors.period_month && (
-                      <p className="text-xs text-rose-600">
+                      <p className="text-xs text-rose-600 dark:text-rose-400">
                         {errors.period_month.message}
                       </p>
                     )}
@@ -824,7 +1170,7 @@ export function AdminDashboard({
                     <select
                       id="platform"
                       {...register("platform")}
-                      className="flex h-10 w-full rounded-lg border border-input bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      className="flex h-10 w-full rounded-lg border border-input bg-white dark:bg-slate-900 dark:border-slate-700 dark:text-slate-100 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
                       {PLATFORMS.map((p) => (
                         <option key={p} value={p}>
@@ -839,7 +1185,7 @@ export function AdminDashboard({
                     <select
                       id="campaign_type"
                       {...register("campaign_type")}
-                      className="flex h-10 w-full rounded-lg border border-input bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      className="flex h-10 w-full rounded-lg border border-input bg-white dark:bg-slate-900 dark:border-slate-700 dark:text-slate-100 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
                       {CAMPAIGN_TYPES.map((type) => (
                         <option key={type} value={type}>
@@ -860,7 +1206,7 @@ export function AdminDashboard({
                       {...register("campaign_name")}
                     />
                     {errors.campaign_name && (
-                      <p className="text-xs text-rose-600">
+                      <p className="text-xs text-rose-600 dark:text-rose-400">
                         {errors.campaign_name.message}
                       </p>
                     )}
@@ -877,7 +1223,7 @@ export function AdminDashboard({
                       {...register("amount_invested")}
                     />
                     {errors.amount_invested && (
-                      <p className="text-xs text-rose-600">
+                      <p className="text-xs text-rose-600 dark:text-rose-400">
                         {errors.amount_invested.message}
                       </p>
                     )}
@@ -896,7 +1242,7 @@ export function AdminDashboard({
                       {...register("results_count")}
                     />
                     {errors.results_count && (
-                      <p className="text-xs text-rose-600">
+                      <p className="text-xs text-rose-600 dark:text-rose-400">
                         {errors.results_count.message}
                       </p>
                     )}
@@ -918,10 +1264,10 @@ export function AdminDashboard({
 
                   {/* Indicador Calculado Automaticamente */}
                   <div className="space-y-1.5 lg:col-span-2">
-                    <Label className="text-blue-700 font-semibold">
+                    <Label className="text-blue-700 dark:text-blue-400 font-semibold">
                       {dynamicFieldLabels.autoMetricLabel}
                     </Label>
-                    <div className="flex h-10 items-center rounded-lg border border-blue-200 bg-blue-50/70 px-3 text-sm font-bold text-blue-900">
+                    <div className="flex h-10 items-center rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/70 dark:bg-blue-950/50 px-3 text-sm font-bold text-blue-900 dark:text-blue-200">
                       {dynamicFieldLabels.autoMetricValue}
                     </div>
                   </div>
@@ -929,11 +1275,11 @@ export function AdminDashboard({
 
                 {/* Linha extra condicional para E-commerce / Vendas */}
                 {dynamicFieldLabels.showRevenue && (
-                  <div className="grid grid-cols-1 gap-4 rounded-xl border border-emerald-200 bg-emerald-50/40 p-4 sm:grid-cols-2">
+                  <div className="grid grid-cols-1 gap-4 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/40 dark:bg-emerald-950/30 p-4 sm:grid-cols-2">
                     <div className="space-y-1.5">
                       <Label
                         htmlFor="revenue_generated"
-                        className="text-emerald-900"
+                        className="text-emerald-900 dark:text-emerald-300"
                       >
                         Faturamento Gerado (R$)
                       </Label>
@@ -947,10 +1293,10 @@ export function AdminDashboard({
                       />
                     </div>
                     <div className="space-y-1.5">
-                      <Label className="text-emerald-900">
+                      <Label className="text-emerald-900 dark:text-emerald-300">
                         ROAS (Retorno sobre Investimento Publicitário)
                       </Label>
-                      <div className="flex h-10 items-center rounded-lg border border-emerald-300 bg-white px-3 text-sm font-bold text-emerald-700">
+                      <div className="flex h-10 items-center rounded-lg border border-emerald-300 dark:border-emerald-800 bg-white dark:bg-slate-900 px-3 text-sm font-bold text-emerald-700 dark:text-emerald-400">
                         {calculatedMetrics.roas.toFixed(2)}x (Para cada R$ 1,00
                         investido, voltaram{" "}
                         {formatBRL(calculatedMetrics.roas)})
@@ -981,8 +1327,8 @@ export function AdminDashboard({
                       onClick={() => fileInputRef.current?.click()}
                       className={`cursor-pointer rounded-xl border-2 border-dashed p-4 transition-all ${
                         isDragging
-                          ? "border-blue-500 bg-blue-50"
-                          : "border-slate-200 bg-slate-50/50 hover:border-blue-400 hover:bg-slate-50"
+                          ? "border-blue-500 bg-blue-50 dark:bg-blue-950/40"
+                          : "border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-900/50 hover:border-blue-400 hover:bg-slate-50 dark:hover:bg-slate-800/60"
                       }`}
                     >
                       <input
@@ -997,7 +1343,7 @@ export function AdminDashboard({
                       />
 
                       {uploadingImage ? (
-                        <div className="flex flex-col items-center justify-center py-6 text-slate-600">
+                        <div className="flex flex-col items-center justify-center py-6 text-slate-600 dark:text-slate-300">
                           <Loader2 className="h-7 w-7 animate-spin text-blue-600 mb-2" />
                           <span className="text-xs font-medium">
                             Enviando imagem para o bucket creatives...
@@ -1010,13 +1356,13 @@ export function AdminDashboard({
                             <img
                               src={watchedCreativeUrl}
                               alt="Preview do Criativo"
-                              className="h-16 w-16 rounded-lg object-cover border border-slate-200"
+                              className="h-16 w-16 rounded-lg object-cover border border-slate-200 dark:border-slate-700"
                             />
                             <div className="text-xs">
-                              <p className="font-semibold text-emerald-700">
+                              <p className="font-semibold text-emerald-700 dark:text-emerald-400">
                                 Criativo anexado com sucesso!
                               </p>
-                              <p className="text-slate-500 mt-0.5">
+                              <p className="text-slate-500 dark:text-slate-400 mt-0.5">
                                 Clique para substituir a imagem
                               </p>
                             </div>
@@ -1035,12 +1381,12 @@ export function AdminDashboard({
                         </div>
                       ) : (
                         <div className="flex flex-col items-center justify-center py-4 text-center">
-                          <div className="h-10 w-10 rounded-full bg-blue-100/80 text-blue-600 flex items-center justify-center mb-2">
+                          <div className="h-10 w-10 rounded-full bg-blue-100/80 dark:bg-blue-950 text-blue-600 dark:text-blue-400 flex items-center justify-center mb-2">
                             <UploadCloud className="h-5 w-5" />
                           </div>
-                          <p className="text-xs font-medium text-slate-700">
+                          <p className="text-xs font-medium text-slate-700 dark:text-slate-300">
                             Arraste e solte o print/banner do anúncio ou{" "}
-                            <span className="text-blue-600 underline">
+                            <span className="text-blue-600 dark:text-blue-400 underline">
                               clique para selecionar
                             </span>
                           </p>
@@ -1062,7 +1408,7 @@ export function AdminDashboard({
                       id="observation"
                       rows={4}
                       placeholder="Explique em linguagem simples o contexto deste mês: quais criativos performaram melhor, ajustes de público realizados e próximos passos recomendados..."
-                      className="flex w-full rounded-xl border border-input bg-white px-3.5 py-2.5 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      className="flex w-full rounded-xl border border-input bg-white dark:bg-slate-900 dark:border-slate-700 dark:text-slate-100 px-3.5 py-2.5 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       {...register("observation")}
                     />
                   </div>
@@ -1073,7 +1419,7 @@ export function AdminDashboard({
                     type="submit"
                     size="lg"
                     disabled={isSubmitting || uploadingImage}
-                    className="gap-2 bg-blue-600 hover:bg-blue-700"
+                    className="gap-2 bg-blue-600 hover:bg-blue-700 text-white"
                   >
                     {isSubmitting ? (
                       <>
@@ -1107,7 +1453,8 @@ export function AdminDashboard({
                   Histórico de Lançamentos ({filteredRecords.length})
                 </CardTitle>
                 <CardDescription>
-                  Gerencie, edite ou exclua campanhas lançadas para os clientes.
+                  Gerencie, edite ou exclua campanhas lançadas para os clientes e
+                  suas empresas.
                 </CardDescription>
               </div>
 
@@ -1115,12 +1462,12 @@ export function AdminDashboard({
                 <select
                   value={filterClientId}
                   onChange={(e) => setFilterClientId(e.target.value)}
-                  className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
+                  className="h-9 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 text-xs font-medium text-slate-700 dark:text-slate-200"
                 >
                   <option value="all">Todos os Clientes</option>
                   {clients.map((c) => (
                     <option key={c.id} value={c.id}>
-                      {c.company_name}
+                      {c.client_name} ({c.company_name})
                     </option>
                   ))}
                 </select>
@@ -1128,7 +1475,7 @@ export function AdminDashboard({
                 <select
                   value={filterMonth}
                   onChange={(e) => setFilterMonth(e.target.value)}
-                  className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
+                  className="h-9 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 text-xs font-medium text-slate-700 dark:text-slate-200"
                 >
                   <option value="all">Todos os Meses</option>
                   {availableMonths.map((m) => (
@@ -1143,16 +1490,16 @@ export function AdminDashboard({
 
           <CardContent>
             {filteredRecords.length === 0 ? (
-              <div className="py-12 text-center text-sm text-slate-500">
+              <div className="py-12 text-center text-sm text-slate-500 dark:text-slate-400">
                 Nenhum lançamento encontrado para os filtros selecionados.
               </div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse">
                   <thead>
-                    <tr className="border-b border-slate-200 text-xs font-semibold uppercase tracking-wider text-slate-500 bg-slate-50/80">
+                    <tr className="border-b border-slate-200 dark:border-slate-800 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 bg-slate-50/80 dark:bg-slate-900/60">
                       <th className="py-3 px-3">Competência</th>
-                      <th className="py-3 px-3">Cliente</th>
+                      <th className="py-3 px-3">Cliente / Empresa</th>
                       <th className="py-3 px-3">Plataforma</th>
                       <th className="py-3 px-3">Campanha / Objetivo</th>
                       <th className="py-3 px-3 text-right">Investimento</th>
@@ -1162,26 +1509,41 @@ export function AdminDashboard({
                       <th className="py-3 px-3 text-right">Ações</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-200/70 text-sm">
+                  <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800 text-sm">
                     {filteredRecords.map((rec) => {
                       const clientObj = clients.find(
                         (c) => c.id === rec.client_id
                       );
-                      const companyLabel =
+                      const fallbackCompany =
+                        getProfileCompanies(clientObj)[0] ??
                         rec.profiles?.company_name ??
                         clientObj?.company_name ??
                         "Cliente";
 
+                      const { companyName, cleanCampaignName } =
+                        unpackCampaignCompany(
+                          rec.campaign_name,
+                          rec.company_name,
+                          fallbackCompany
+                        );
+
                       return (
                         <tr
                           key={rec.id}
-                          className="hover:bg-slate-50/90 transition-colors"
+                          className="hover:bg-slate-50/90 dark:hover:bg-slate-800/40 transition-colors"
                         >
-                          <td className="py-3.5 px-3 whitespace-nowrap font-medium text-slate-800">
+                          <td className="py-3.5 px-3 whitespace-nowrap font-medium text-slate-800 dark:text-slate-200">
                             {rec.period_month}
                           </td>
-                          <td className="py-3.5 px-3 font-medium text-slate-900">
-                            {companyLabel}
+                          <td className="py-3.5 px-3">
+                            <p className="font-semibold text-slate-900 dark:text-slate-100">
+                              {companyName}
+                            </p>
+                            <p className="text-xs text-slate-500 dark:text-slate-400">
+                              {clientObj?.client_name ??
+                                rec.profiles?.client_name ??
+                                ""}
+                            </p>
                           </td>
                           <td className="py-3.5 px-3 whitespace-nowrap">
                             <Badge
@@ -1193,20 +1555,20 @@ export function AdminDashboard({
                             </Badge>
                           </td>
                           <td className="py-3.5 px-3">
-                            <p className="font-semibold text-slate-900">
-                              {rec.campaign_name}
+                            <p className="font-semibold text-slate-900 dark:text-slate-100">
+                              {cleanCampaignName}
                             </p>
-                            <p className="text-xs text-slate-500">
+                            <p className="text-xs text-slate-500 dark:text-slate-400">
                               {rec.campaign_type}
                             </p>
                           </td>
-                          <td className="py-3.5 px-3 text-right font-semibold text-slate-900 whitespace-nowrap">
+                          <td className="py-3.5 px-3 text-right font-semibold text-slate-900 dark:text-slate-100 whitespace-nowrap">
                             {formatBRL(Number(rec.amount_invested))}
                           </td>
-                          <td className="py-3.5 px-3 text-right font-medium text-slate-800 whitespace-nowrap">
+                          <td className="py-3.5 px-3 text-right font-medium text-slate-800 dark:text-slate-200 whitespace-nowrap">
                             {formatNumber(Number(rec.results_count))}
                           </td>
-                          <td className="py-3.5 px-3 text-right font-medium text-blue-700 whitespace-nowrap">
+                          <td className="py-3.5 px-3 text-right font-medium text-blue-700 dark:text-blue-400 whitespace-nowrap">
                             {formatBRL(Number(rec.cost_per_result))}
                           </td>
                           <td className="py-3.5 px-3 text-center">
@@ -1215,7 +1577,7 @@ export function AdminDashboard({
                                 href={rec.creative_image_url}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="inline-flex items-center justify-center h-8 w-8 rounded-lg border border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100"
+                                className="inline-flex items-center justify-center h-8 w-8 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 hover:bg-blue-100"
                                 title="Abrir imagem do criativo"
                               >
                                 <ImagePlus className="h-4 w-4" />
@@ -1233,7 +1595,7 @@ export function AdminDashboard({
                                 onClick={() => handleEditRecord(rec)}
                                 title="Editar lançamento"
                               >
-                                <Edit3 className="h-4 w-4 text-slate-600" />
+                                <Edit3 className="h-4 w-4 text-slate-600 dark:text-slate-300" />
                               </Button>
                               <Button
                                 type="button"
@@ -1242,7 +1604,7 @@ export function AdminDashboard({
                                 onClick={() => handleDeleteRecord(rec.id)}
                                 title="Excluir lançamento"
                               >
-                                <Trash2 className="h-4 w-4 text-rose-600" />
+                                <Trash2 className="h-4 w-4 text-rose-600 dark:text-rose-400" />
                               </Button>
                             </div>
                           </td>
